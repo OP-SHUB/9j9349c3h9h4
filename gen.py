@@ -242,8 +242,9 @@ def run():
     proxy_list = []
     _loaded_config = False
 
-    # On loop restarts, load saved config instead of asking
-    if _LOOP_MODE and os.path.isfile(_LOOP_CONFIG):
+    # Only auto-load config if there's unfinished progress to resume
+    _has_progress = os.path.isfile(_PROGRESS_FILE)
+    if _LOOP_MODE and _has_progress and os.path.isfile(_LOOP_CONFIG):
         try:
             import json as _json
             with open(_LOOP_CONFIG, 'r', encoding='utf-8') as f:
@@ -257,7 +258,7 @@ def run():
             imei_count = cfg.get('imei_count', 100)
             threads = cfg.get('threads', 5)
             _loaded_config = True
-            print(f"  Loaded saved config (pattern={p} range={start_n}-{end_n} threads={threads})")
+            print(f"  Resuming with saved config (pattern={p} range={start_n}-{end_n} threads={threads})")
             if pf and os.path.isfile(pf):
                 with open(pf, 'r', encoding='utf-8') as f:
                     raw = [l.strip() for l in f if l.strip() and not l.startswith('#')]
@@ -479,7 +480,12 @@ def run():
             for did in gen:
                 if stop_event.is_set():
                     break
-                work_q.put(did, block=True, timeout=1)
+                while not stop_event.is_set():
+                    try:
+                        work_q.put(did, block=True, timeout=5)
+                        break
+                    except Exception:
+                        continue
         except Exception:
             pass
         finally:
@@ -527,10 +533,12 @@ def run():
         for t in ts:
             t.join()
     except KeyboardInterrupt:
-        save_progress(checked_count[0])
-        print(f"\n  {Fore.YELLOW}Paused — progress saved at #{checked_count[0]}. Run again to resume.{Style.RESET_ALL}")
         stop_event.set()
         pbar.close()
+        if os.path.isfile(_PROGRESS_FILE):
+            try: os.remove(_PROGRESS_FILE)
+            except: pass
+        print(f"\n  {Fore.YELLOW}Stopped — run again to start fresh.{Style.RESET_ALL}")
         return
     stop_event.set()
     pbar.close()
@@ -552,7 +560,20 @@ def run():
     print(f"  {'=' * 52}")
 
     if _LOOP_MODE:
-        print(f"\n  Restarting in 2s...")
+        if use_num == 'y' and _loaded_config:
+            rng_size = end_n - start_n + 1
+            new_start = end_n + 1
+            new_end = new_start + rng_size - 1
+            cfg['start_n'] = new_start
+            cfg['end_n'] = new_end
+            try:
+                import json as _json
+                with open(_LOOP_CONFIG, 'w', encoding='utf-8') as f:
+                    _json.dump(cfg, f, indent=2)
+            except Exception:
+                pass
+            print(f"\n  Advancing to next range: {new_start}-{new_end}")
+        print(f"  Restarting in 2s...")
         time.sleep(2)
     else:
         again = input(f"\n  Run again? (y/n) [n]: ").strip().lower()
