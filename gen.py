@@ -95,39 +95,60 @@ def _gen_num_range(start_n, end_n, pattern):
             yield f'ios_{n}'
 
 
+def gen_real_device(id_imei_md5, aid=None, adv=None):
+    """Assemble a device ID exactly like MLBB's real format:
+       and_<md5(imei)>_<android_id>_<uuid>"""
+    return f'and_{id_imei_md5}_{aid if aid else gen_rand_aid()}_{adv if adv else uuid.uuid4()}'
+
+
 def _gen_default_imei(count):
-    """Generator — random default IMEI devices."""
+    """Generator — random default IMEI devices (proper MLBB format)."""
     for _ in range(count):
-        yield f'and_{DEFAULT_IMEI}{gen_rand_aid()}{uuid.uuid4()}'
+        yield gen_real_device(DEFAULT_IMEI)
+
+
+def _luhn_check_digit(num_str):
+    total = 0
+    for i, d in enumerate(reversed(num_str)):
+        digit = int(d)
+        if i % 2 == 1:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        total += digit
+    return (10 - (total % 10)) % 10
 
 
 def _gen_guest_imei(count):
-    """Generator — guest IMEI devices with check-digit validation."""
-    seen = set()
-    n = random.randint(0, 9999999)
+    seed = random.randint(1000000, 9999999)
     yielded = 0
+    n = seed
     while yielded < count:
         imei_str = f'{n:015d}'
         n += 1
-        total = 0
-        for i, d in enumerate(reversed(imei_str)):
-            digit = int(d)
-            if i % 2 == 1:
-                digit *= 2
-                if digit > 9:
-                    digit -= 9
-            total += digit
-        if total % 10 != 0:
+        if _luhn_check_digit(imei_str[:-1] if False else imei_str) != int(imei_str[-1]):
             continue
         md5 = hashlib.md5(imei_str.encode()).hexdigest()
-        if md5 in seen:
-            continue
-        seen.add(md5)
-        # inject known IMEIs first
         if yielded < len(ALL_POOL_IMEIS):
-            yield f'and_{ALL_POOL_IMEIS[yielded]}{ALL_ZERO_AID}{ALL_ZERO_UUID}'
+            yield gen_real_device(ALL_POOL_IMEIS[yielded])
         else:
-            yield f'and_{md5}{ALL_ZERO_AID}{ALL_ZERO_UUID}'
+            yield gen_real_device(md5)
+        yielded += 1
+
+
+def _gen_random_imei(count):
+    """Generator — fully random valid IMEIs (like miniwebtool) as short and_<md5(imei)> IDs."""
+    yielded = 0
+    while yielded < count:
+        tac = random.choice([
+            '35', '86', '01', '91', '99', '45', '49', '54', '55', '56',
+            '86', '87', '89', '90', '93', '98', '35', '33', '44', '60',
+        ]) + f'{random.randint(0, 999999):06d}'
+        serial = f'{random.randint(0, 999999):06d}'
+        base = tac + serial
+        imei = base + str(_luhn_check_digit(base))
+        md5 = hashlib.md5(imei.encode()).hexdigest()
+        yield f'and_{md5}'
         yielded += 1
 
 
@@ -255,6 +276,7 @@ def run():
             start_n = cfg.get('start_n', 1)
             end_n = cfg.get('end_n', 1)
             use_def = cfg.get('use_def', 'n')
+            use_rand = cfg.get('use_rand', 'y')
             imei_count = cfg.get('imei_count', 100)
             threads = cfg.get('threads', 5)
             _loaded_config = True
@@ -308,6 +330,7 @@ def run():
         p = None
         use_def = 'n'
         use_num = 'n'
+        use_rand = 'y'
         imei_count = 100
 
     if os.path.isfile(_PROGRESS_FILE):
@@ -362,7 +385,8 @@ def run():
             if use_def == 'y':
                 imei_count = int(input("  Devices to generate? [100]: ").strip() or "100")
             else:
-                imei_count = int(input("  Guest IMEIs to scan? [100]: ").strip() or "100")
+                use_rand = input("  Use random valid IMEIs only? (y/n) [y]: ").strip().lower() or 'y'
+                imei_count = int(input("  Random IMEIs to scan? [100]: ").strip() or "100")
 
     # Build generator + total count
     total_count = 0
@@ -392,8 +416,9 @@ def run():
                     'pattern': p,
                     'start_n': start_n if use_num == 'y' else 0,
                     'end_n': end_n if use_num == 'y' else 0,
-                    'use_def': use_def,
-                    'imei_count': imei_count,
+'use_def': use_def,
+                'use_rand': use_rand,
+                'imei_count': imei_count,
                     'threads': threads,
                 }, f, indent=2)
             print(f"  Config saved for auto-restart.")
@@ -474,6 +499,8 @@ def run():
             gen = _gen_num_range(gen_start, end_n, p)
         elif use_def == 'y':
             gen = _gen_default_imei(total_count)
+        elif use_rand == 'y':
+            gen = _gen_random_imei(total_count)
         else:
             gen = _gen_guest_imei(total_count)
         try:
