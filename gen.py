@@ -101,10 +101,12 @@ def gen_real_device(id_imei_md5, aid=None, adv=None):
     return f'and_{id_imei_md5}_{aid if aid else gen_rand_aid()}_{adv if adv else uuid.uuid4()}'
 
 
-def _gen_default_imei(count):
+def _gen_default_imei(count=None):
     """Generator — random default IMEI devices (proper MLBB format)."""
-    for _ in range(count):
+    i = 0
+    while count is None or i < count:
         yield gen_real_device(DEFAULT_IMEI)
+        i += 1
 
 
 def _luhn_check_digit(num_str):
@@ -119,14 +121,14 @@ def _luhn_check_digit(num_str):
     return (10 - (total % 10)) % 10
 
 
-def _gen_guest_imei(count):
+def _gen_guest_imei(count=None):
     seed = random.randint(1000000, 9999999)
     yielded = 0
     n = seed
-    while yielded < count:
+    while count is None or yielded < count:
         imei_str = f'{n:015d}'
         n += 1
-        if _luhn_check_digit(imei_str[:-1] if False else imei_str) != int(imei_str[-1]):
+        if _luhn_check_digit(imei_str) != int(imei_str[-1]):
             continue
         md5 = hashlib.md5(imei_str.encode()).hexdigest()
         if yielded < len(ALL_POOL_IMEIS):
@@ -136,10 +138,11 @@ def _gen_guest_imei(count):
         yielded += 1
 
 
-def _gen_random_imei(count):
-    """Generator — fully random valid IMEIs (like miniwebtool) as short and_<md5(imei)> IDs."""
+def _gen_random_imei(count=None):
+    """Generator — fully random valid IMEIs (like miniwebtool's random IMEI generator)
+       as short and_<md5(imei)> IDs. Infinite when count is None."""
     yielded = 0
-    while yielded < count:
+    while count is None or yielded < count:
         tac = random.choice([
             '35', '86', '01', '91', '99', '45', '49', '54', '55', '56',
             '86', '87', '89', '90', '93', '98', '35', '33', '44', '60',
@@ -207,7 +210,7 @@ def run():
     print(f"  {'=' * 52}\n")
 
     mode = 'check'
-    if not (_LOOP_MODE and os.path.isfile(_LOOP_CONFIG)):
+    if not os.path.isfile(_LOOP_CONFIG):
         mode = (input("  Mode (generate/check) [check]: ").strip() or 'check').lower()
 
     if mode == 'generate':
@@ -262,32 +265,6 @@ def run():
     # ── Check mode ──
     proxy_list = []
     _loaded_config = False
-
-    # Only auto-load config if there's unfinished progress to resume
-    _has_progress = os.path.isfile(_PROGRESS_FILE)
-    if _LOOP_MODE and _has_progress and os.path.isfile(_LOOP_CONFIG):
-        try:
-            import json as _json
-            with open(_LOOP_CONFIG, 'r', encoding='utf-8') as f:
-                cfg = _json.load(f)
-            pf = cfg.get('proxy_file', '')
-            use_num = cfg.get('use_num', 'n')
-            p = cfg.get('pattern', '1')
-            start_n = cfg.get('start_n', 1)
-            end_n = cfg.get('end_n', 1)
-            use_def = cfg.get('use_def', 'n')
-            use_rand = cfg.get('use_rand', 'y')
-            imei_count = cfg.get('imei_count', 100)
-            threads = cfg.get('threads', 5)
-            _loaded_config = True
-            print(f"  Resuming with saved config (pattern={p} range={start_n}-{end_n} threads={threads})")
-            if pf and os.path.isfile(pf):
-                with open(pf, 'r', encoding='utf-8') as f:
-                    raw = [l.strip() for l in f if l.strip() and not l.startswith('#')]
-                proxy_list = [proxy for r in raw if (proxy := _parse_proxy(r)) is not None]
-                print(f"  Loaded {len(proxy_list)} proxies from {pf}")
-        except Exception:
-            _loaded_config = False
 
     if not _loaded_config:
         pf = input("  Proxy file (user:pass@host:port per line, blank=none)?: ").strip()
@@ -348,7 +325,7 @@ def run():
                 os.remove(_PROGRESS_FILE)
                 progress = None
             else:
-                resume = 'y' if _LOOP_MODE else input("  Resume? (y/n) [y]: ").strip().lower() or 'y'
+                resume = input("  Resume? (y/n) [y]: ").strip().lower() or 'y'
                 if resume == 'y':
                     resume_mode = True
                     resume_idx = old_checked
@@ -405,25 +382,24 @@ def run():
     if threads > 1000:
         threads = 1000
 
-    # Save config for loop restarts
-    if _LOOP_MODE and not _loaded_config:
-        try:
-            import json as _json
-            with open(_LOOP_CONFIG, 'w', encoding='utf-8') as f:
-                _json.dump({
-                    'proxy_file': pf,
-                    'use_num': use_num,
-                    'pattern': p,
-                    'start_n': start_n if use_num == 'y' else 0,
-                    'end_n': end_n if use_num == 'y' else 0,
-'use_def': use_def,
+    # Save config for resumes
+    try:
+        import json as _json
+        with open(_LOOP_CONFIG, 'w', encoding='utf-8') as f:
+            _json.dump({
+                'proxy_file': pf,
+                'use_num': use_num,
+                'pattern': p,
+                'start_n': start_n if use_num == 'y' else 0,
+                'end_n': end_n if use_num == 'y' else 0,
+                'use_def': use_def,
                 'use_rand': use_rand,
                 'imei_count': imei_count,
-                    'threads': threads,
-                }, f, indent=2)
-            print(f"  Config saved for auto-restart.")
-        except Exception:
-            pass
+                'threads': threads,
+            }, f, indent=2)
+        print(f"  Config saved.")
+    except Exception:
+        pass
 
     if resume_mode:
         print(f"  Resumed from #{resume_idx}, {total_count} remaining")
@@ -450,6 +426,7 @@ def run():
     dupe_count = [0]
     checked_count = [0]
     checked_lock = threading.Lock()
+    abs_offset = resume_idx
     t0 = time.time()
     stop_event = threading.Event()
 
@@ -476,9 +453,11 @@ def run():
             try:
                 import json as _json
                 with open(_PROGRESS_FILE, 'w', encoding='utf-8') as f:
-                    _json.dump({'start_n': start_n, 'end_n': end_n, 'pattern': p, 'checked': checked, 'total': end_n - start_n + 1}, f)
+                    _json.dump({'start_n': start_n, 'end_n': end_n, 'pattern': p, 'checked': abs_offset + checked, 'total': end_n - start_n + 1}, f)
             except Exception:
                 pass
+
+    paused = [False]
 
     def keyboard_listener():
         while not stop_event.is_set():
@@ -487,7 +466,9 @@ def run():
                 if ch == b' ':
                     with checked_lock:
                         save_progress(checked_count[0])
-                    print(f"\n  {Fore.YELLOW}Progress saved at #{checked_count[0]}. Press SPACE again to quit.{Style.RESET_ALL}")
+                    paused[0] = True
+                    stop_event.set()
+                    print(f"\n  {Fore.YELLOW}Paused & saved at #{checked_count[0]}. Run again to resume.{Style.RESET_ALL}")
             time.sleep(0.05)
 
     listener = threading.Thread(target=keyboard_listener, daemon=True)
@@ -495,7 +476,7 @@ def run():
 
     # Producer — single thread, no thread-safety issue on generator
     def producer():
-        if use_num == 'y':
+        if resume_mode or use_num == 'y':
             gen = _gen_num_range(gen_start, end_n, p)
         elif use_def == 'y':
             gen = _gen_default_imei(total_count)
@@ -562,20 +543,12 @@ def run():
     except KeyboardInterrupt:
         stop_event.set()
         pbar.close()
-        if os.path.isfile(_PROGRESS_FILE):
-            try: os.remove(_PROGRESS_FILE)
-            except: pass
-        print(f"\n  {Fore.YELLOW}Stopped — run again to start fresh.{Style.RESET_ALL}")
+        save_progress(checked_count[0])
+        print(f"\n  {Fore.YELLOW}Paused — progress saved at #{checked_count[0]}. Run again to resume.{Style.RESET_ALL}")
         return
     stop_event.set()
     pbar.close()
     elapsed = time.time() - t0
-
-    if os.path.isfile(_PROGRESS_FILE):
-        try:
-            os.remove(_PROGRESS_FILE)
-        except Exception:
-            pass
 
     print(f"\n  {'=' * 52}")
     print(f"  Checked: {checked_count[0]} in {elapsed:.0f}s ({checked_count[0] / max(elapsed, 0.1):.0f}/s)")
@@ -586,40 +559,18 @@ def run():
         print(f"  Proxies: {len(proxy_list)} working")
     print(f"  {'=' * 52}")
 
-    if _LOOP_MODE:
-        if use_num == 'y' and _loaded_config:
-            rng_size = end_n - start_n + 1
-            new_start = end_n + 1
-            new_end = new_start + rng_size - 1
-            cfg['start_n'] = new_start
-            cfg['end_n'] = new_end
-            try:
-                import json as _json
-                with open(_LOOP_CONFIG, 'w', encoding='utf-8') as f:
-                    _json.dump(cfg, f, indent=2)
-            except Exception:
-                pass
-            print(f"\n  Advancing to next range: {new_start}-{new_end}")
-        print(f"  Restarting in 2s...")
-        time.sleep(2)
-    else:
-        again = input(f"\n  Run again? (y/n) [n]: ").strip().lower()
-        if again == 'y':
-            run()
+    # If we got here without a stop/pause, the range fully completed → clear progress
+    if not paused[0]:
+        if os.path.isfile(_PROGRESS_FILE):
+            try: os.remove(_PROGRESS_FILE)
+            except: pass
+    if paused[0]:
+        return
 
+    again = input(f"\n  Run again? (y/n) [y]: ").strip().lower() or 'y'
+    if again == 'y':
+        run()
 
-_LOOP_MODE = '--loop' in sys.argv or '--no-loop' not in sys.argv
 
 if __name__ == '__main__':
-    if '--no-loop' in sys.argv:
-        run()
-    else:
-        _LOOP_MODE = True
-        while True:
-            try:
-                run()
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                print(f"\n  Error: {e}, restarting in 3s...")
-                time.sleep(3)
+    run()
